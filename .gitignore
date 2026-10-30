@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+data/
+inputvideos/
+outputs/
+*.mp4
+*.webm
+*.mov
+cache/
+runs/
+*.pt
+*.cache
+.env
+!weights/ball_best.pt

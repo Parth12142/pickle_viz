@@ -1,0 +1,26 @@
+{
+  "clip": "data/clips/match.mp4",
+  "resolution": "1302x740",
+  "fps": 30.0,
+  "frames": 289,
+  "clip_seconds": 9.63,
+  "model": "yolo11n.pt",
+  "device": "CPU: 11th Gen Intel(R) Core(TM) i5-11400 @ 2.60GHz",
+  "load_model_s": 1.73,
+  "read_s": 0.54,
+  "track_s": 8.18,
+  "track_ms_per_frame": 28.3,
+  "track_fps": 35.3,
+  "realtime_factor": 0.85,
+  "model_only_ms_per_frame": 26.3,
+  "render_s": 3.76,
+  "total_s": 12.48,
+  "players_tracked": 4,
+  "frames_per_track": {
+    "1": 289,
+    "2": 289,
+    "3": 286,
+    "4": 289
+  },
+  "mean_players_per_frame": 3.99
+}
