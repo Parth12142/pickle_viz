@@ -45,7 +45,7 @@ def run(frames, fps, size, cfg):
             cands.append({"x": (x1 + x2) / 2.0, "y": (y1 + y2) / 2.0, "conf": c})
         raw_candidates.append(cands)
 
-    # Step 2: Track continuous trajectory using motion prediction & velocity gating
+    # Step 2: Track continuous trajectory with motion gating
     tracked_points = [None] * len(frames)
     last_pos = None
     velocity = [0.0, 0.0]
@@ -58,6 +58,7 @@ def run(frames, fps, size, cfg):
 
         if last_pos is None:
             best = max(cands, key=lambda c: c["conf"])
+            best["speed"] = 0.0
             tracked_points[i] = best
             last_pos = best
             velocity = [0.0, 0.0]
@@ -78,6 +79,8 @@ def run(frames, fps, size, cfg):
             if best_cand is not None:
                 new_vx = best_cand["x"] - last_pos["x"]
                 new_vy = best_cand["y"] - last_pos["y"]
+                speed = float(np.hypot(new_vx, new_vy))
+                best_cand["speed"] = speed
                 velocity = [0.7 * new_vx + 0.3 * velocity[0], 0.7 * new_vy + 0.3 * velocity[1]]
                 tracked_points[i] = best_cand
                 last_pos = best_cand
@@ -85,10 +88,12 @@ def run(frames, fps, size, cfg):
                 last_pos = None
                 velocity = [0.0, 0.0]
 
-    # Step 3: Interpolate small gaps (1 to 5 missed frames) along trajectory
+    # Step 3: Parabolic Arc Interpolation across small gaps (1 to 5 frames)
     interpolated = list(tracked_points)
     i = 0
     n = len(interpolated)
+    g_est = 0.4  # Slight gravitational downward acceleration per frame^2
+
     while i < n:
         if interpolated[i] is None:
             gap_start = i
@@ -104,16 +109,19 @@ def run(frames, fps, size, cfg):
                 if total_dist <= max_jump_px * (gap_len + 1):
                     for k in range(gap_start, gap_end):
                         alpha = (k - gap_start + 1) / (gap_len + 1)
+                        # Arc sag along y axis
+                        sag = 4.0 * alpha * (1.0 - alpha) * (g_est * (gap_len ** 1.5))
                         interpolated[k] = {
                             "x": p1["x"] + alpha * (p2["x"] - p1["x"]),
-                            "y": p1["y"] + alpha * (p2["y"] - p1["y"]),
+                            "y": p1["y"] + alpha * (p2["y"] - p1["y"]) + sag,
                             "conf": 0.5,
+                            "speed": float(total_dist / (gap_len + 1)),
                             "interpolated": True,
                         }
         else:
             i += 1
 
-    # Step 4: Trajectory smoothing (Gaussian/moving window)
+    # Step 4: Moving window smoothing
     smoothed = list(interpolated)
     window = 3
     for k in range(len(interpolated)):
@@ -128,6 +136,7 @@ def run(frames, fps, size, cfg):
                     "x": float(np.mean([p["x"] for p in nbrs])),
                     "y": float(np.mean([p["y"] for p in nbrs])),
                     "conf": interpolated[k]["conf"],
+                    "speed": interpolated[k].get("speed", 0.0),
                 }
 
     process_s = time.perf_counter() - t
@@ -155,7 +164,7 @@ def draw(frame, i, data):
     start_idx = max(0, i - trail_len)
     trail_segment = pts[start_idx : i + 1]
 
-    # Draw gradient glowing trail
+    # Draw Speed-Responsive Glowing Trail
     glow = frame.copy()
     has_segments = False
 
@@ -173,24 +182,39 @@ def draw(frame, i, data):
         pt1 = (int(p1["x"]), int(p1["y"]))
         pt2 = (int(p2["x"]), int(p2["y"]))
 
-        # Outer soft glow on overlay
-        glow_color = (0, int(180 + 75 * progress), int(220 + 35 * progress))
-        cv2.line(glow, pt1, pt2, glow_color, int(progress * 6) + 2, lineType=cv2.LINE_AA)
+        # Dynamic Color based on Ball Speed
+        speed = p2.get("speed", dist)
+        if speed > 22.0:
+            # Fast shot: Blazing Orange/Flame (BGR)
+            base_color = (0, 140, 255)
+            core_color = (180, 230, 255)
+        elif speed > 10.0:
+            # Rally: Electric Chartreuse Neon Yellow
+            base_color = (0, 240, 220)
+            core_color = (220, 255, 255)
+        else:
+            # Soft touch / Drop: Ice Cyan
+            base_color = (255, 220, 0)
+            core_color = (255, 255, 200)
 
-        # Crisp inner core line on frame
-        core_color = (200, 255, 255)
-        cv2.line(frame, pt1, pt2, core_color, max(1, int(progress * 2)), lineType=cv2.LINE_AA)
+        # Outer soft glow
+        cv2.line(glow, pt1, pt2, base_color, int(progress * 6) + 2, lineType=cv2.LINE_AA)
+        # Inner sharp core
+        cv2.line(frame, pt1, pt2, core_color, max(1, int(progress * 2.2)), lineType=cv2.LINE_AA)
         has_segments = True
 
     if has_segments:
-        cv2.addWeighted(glow, 0.40, frame, 0.60, 0, frame)
+        cv2.addWeighted(glow, 0.45, frame, 0.55, 0, frame)
 
-    # Draw high-visibility reticle around current ball position
+    # High-visibility Ball Reticle
     curr = pts[i]
     if curr is not None:
         cx, cy = int(curr["x"]), int(curr["y"])
-        # High contrast outer circle
-        cv2.circle(frame, (cx, cy), 11, (0, 0, 0), 3, lineType=cv2.LINE_AA)
-        cv2.circle(frame, (cx, cy), 11, (0, 255, 255), 2, lineType=cv2.LINE_AA)
-        # Bright center dot
-        cv2.circle(frame, (cx, cy), 3, (0, 255, 255), -1, lineType=cv2.LINE_AA)
+        # Outer dark ring for contrast
+        cv2.circle(frame, (cx, cy), 12, (0, 0, 0), 3, lineType=cv2.LINE_AA)
+        # Bright neon indicator ring
+        speed = curr.get("speed", 0.0)
+        ring_color = (0, 140, 255) if speed > 22 else (0, 240, 220)
+        cv2.circle(frame, (cx, cy), 12, ring_color, 2, lineType=cv2.LINE_AA)
+        # Center pip
+        cv2.circle(frame, (cx, cy), 3, (255, 255, 255), -1, lineType=cv2.LINE_AA)
