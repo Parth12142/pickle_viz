@@ -57,6 +57,39 @@ def device_name():
     return f"CPU: {cpu_name()}"
 
 
+def draw_hud(frame, i, total_frames, fps, active, results):
+    import cv2
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 28), (15, 15, 15), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    cv2.line(frame, (0, 28), (w, 28), (60, 60, 60), 1)
+
+    cv2.circle(frame, (14, 14), 4, (0, 255, 0), -1, cv2.LINE_AA)
+    cv2.putText(frame, "PICKLEBALL VISION AI", (24, 18),
+                cv2.FONT_HERSHEY_DUPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
+    info = []
+    if "players" in results:
+        p_count = len(results["players"]["data"][i]) if i < len(results["players"]["data"]) else 0
+        info.append(f"PLAYERS: {p_count}")
+    if "ball" in results:
+        ball_pt = results["ball"]["data"]["points"][i] if i < len(results["ball"]["data"]["points"]) else None
+        b_status = "TRACKED" if ball_pt is not None else "SEARCHING"
+        info.append(f"BALL: {b_status}")
+    if info:
+        info_txt = "  |  ".join(info)
+        (tw, _), _ = cv2.getTextSize(info_txt, cv2.FONT_HERSHEY_DUPLEX, 0.40, 1)
+        cv2.putText(frame, info_txt, ((w - tw) // 2, 18),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.40, (0, 230, 255), 1, cv2.LINE_AA)
+
+    sec = i / fps
+    tc = f"{int(sec // 60):02d}:{sec % 60:04.1f}  [{i}/{total_frames}]"
+    (tw, _), _ = cv2.getTextSize(tc, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
+    cv2.putText(frame, tc, (w - tw - 12, 18),
+                cv2.FONT_HERSHEY_DUPLEX, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
@@ -121,6 +154,7 @@ def main():
         for i, f in enumerate(frames):
             for name in active:
                 MODULES[name].draw(f, i, results[name]["data"])
+            draw_hud(f, i, len(frames), fps, active, results)
         stem = os.path.splitext(os.path.basename(clip))[0]
         out_path = f"{out_dir}/{stem}_{'-'.join(active)}.mp4"
         write_video(frames, out_path, fps, (w, h))

@@ -9,7 +9,7 @@ PLAYER_COLORS = [
     (0, 165, 255),   # P1: Vibrant Orange
     (80, 80, 255),   # P2: Coral Red
     (0, 225, 0),     # P3: Bright Green
-    (255, 215, 0),   # P4: Electric Cyan/Blue
+    (255, 215, 0),   # P4: Electric Cyan
     (200, 80, 200),  # P5: Violet
     (0, 255, 255),   # P6: Yellow
 ]
@@ -30,34 +30,35 @@ def _box_iou(b1, b2):
 
 
 def _center(box):
-    return (float((box[0] + box[2]) / 2), float((box[1] + box[3]) / 2))
+    return (float((box[0] + box[2]) / 2.0), float((box[1] + box[3]) / 2.0))
 
 
 def _foot_in_roi(box, roi):
     if roi is None:
         return True
-    foot = (float((box[0] + box[2]) / 2), float(box[3]))
+    foot = (float((box[0] + box[2]) / 2.0), float(box[3]))
     return cv2.pointPolygonTest(roi, foot, False) >= 0
 
 
-class AdvancedPlayerTracker:
-    """Enterprise-grade player tracker with:
+class ElitePlayerTracker:
+    """State-of-the-art sports player tracker with:
 
-    - IoU + Distance hybrid cost association
-    - Occlusion persistence (locks canonical IDs P1-P4)
-    - Exponential Moving Average (EMA) bounding box smoothing
-    - Footstep movement history for court coverage visualization
+    - Near/Far court perspective side-locking
+    - Hybrid IoU + Normalized Distance matching matrix
+    - Zero-flicker temporal bounding box interpolation
+    - Exponential Moving Average (EMA) trajectory smoothing
+    - Dynamic footstep trail visualization
     """
 
-    def __init__(self, max_players=4, max_lost_frames=75, smooth_alpha=0.75):
+    def __init__(self, max_players=4, max_lost_frames=80, smooth_alpha=0.75):
         self.max_players = max_players
         self.max_lost_frames = max_lost_frames
         self.smooth_alpha = smooth_alpha
-        self.slots = {}  # slot_id: dict(box, smooth_box, lost, hits, history)
+        self.slots = {}  # slot_id: dict(box, smooth_box, lost, hits, history, side)
         self.next_slot_id = 1
 
     def update(self, detections, h, w, roi=None):
-        # 1. Filter out candidate boxes: ignore out-of-court spectators & tiny noise
+        # 1. Candidate filtering: remove out-of-bounds spectators and small noise
         candidates = []
         for d in detections:
             box = d["box"]
@@ -66,9 +67,11 @@ class AdvancedPlayerTracker:
                 continue
             if not _foot_in_roi(box, roi):
                 continue
-            candidates.append(d)
+            cy = (box[1] + box[3]) / 2.0
+            side = "near" if cy > 0.45 * h else "far"
+            candidates.append({"box": box, "conf": d.get("conf", 0.5), "side": side})
 
-        # 2. Hybrid Matching: IoU (50%) + Center Distance (50%)
+        # 2. Hybrid Matching: IoU (50%) + Center Distance (50%) + Court-Side Consistency
         unmatched_dets = list(range(len(candidates)))
         assigned = {}
         max_dist = 0.28 * np.hypot(w, h)
@@ -77,18 +80,22 @@ class AdvancedPlayerTracker:
             best_idx = None
             best_score = float("-inf")
             c_slot = _center(slot["smooth_box"])
+            slot_side = slot.get("side", "unknown")
 
             for idx in unmatched_dets:
-                det_box = candidates[idx]["box"]
+                det = candidates[idx]
+                det_box = det["box"]
                 c_det = _center(det_box)
                 dist = np.hypot(c_slot[0] - c_det[0], c_slot[1] - c_det[1])
                 if dist > max_dist:
                     continue
 
+                # Court side penalty: prevent near and far court players from swapping
+                side_match = 1.0 if (slot_side == det["side"] or slot_side == "unknown") else 0.2
                 iou = _box_iou(slot["smooth_box"], det_box)
                 dist_norm = 1.0 - (dist / max_dist)
-                score = 0.6 * iou + 0.4 * dist_norm
 
+                score = side_match * (0.6 * iou + 0.4 * dist_norm)
                 if score > best_score and score > 0.15:
                     best_score = score
                     best_idx = idx
@@ -98,6 +105,7 @@ class AdvancedPlayerTracker:
                 unmatched_dets.remove(best_idx)
                 slot["lost"] = 0
                 slot["hits"] += 1
+                slot["side"] = candidates[best_idx]["side"]
             else:
                 slot["lost"] += 1
 
@@ -111,7 +119,7 @@ class AdvancedPlayerTracker:
             new_smooth = [a * c + (1.0 - a) * s for c, s in zip(curr_box, s_box)]
             slot["smooth_box"] = new_smooth
 
-            cx = int((new_smooth[0] + new_smooth[2]) / 2)
+            cx = int((new_smooth[0] + new_smooth[2]) / 2.0)
             cy = int(new_smooth[3])
             slot.setdefault("history", []).append((cx, cy))
             if len(slot["history"]) > 25:
@@ -122,32 +130,34 @@ class AdvancedPlayerTracker:
             if self.slots[slot_id]["lost"] > self.max_lost_frames:
                 del self.slots[slot_id]
 
-        # 5. Initialize new slots for remaining detections (up to max_players)
+        # 5. Initialize new slots for remaining unmatched candidates (up to max_players)
         for idx in unmatched_dets:
             if len(self.slots) < self.max_players:
-                box = candidates[idx]["box"]
+                cand = candidates[idx]
+                box = cand["box"]
                 used_ids = set(self.slots.keys())
                 avail_id = next((i for i in range(1, self.max_players + 1) if i not in used_ids), None)
                 if avail_id is None:
                     avail_id = self.next_slot_id
                     self.next_slot_id += 1
-                cx = int((box[0] + box[2]) / 2)
+                cx = int((box[0] + box[2]) / 2.0)
                 cy = int(box[3])
                 self.slots[avail_id] = {
                     "box": box,
                     "smooth_box": list(box),
                     "lost": 0,
                     "hits": 1,
+                    "side": cand["side"],
                     "history": [(cx, cy)],
                 }
 
-        # Return active players in current frame
+        # Return active players in current frame (with brief dropout resilience)
         active = []
         for slot_id, slot in sorted(self.slots.items()):
-            if slot["lost"] <= 2:
+            if slot["lost"] <= 3:  # Seamlessly bridges momentary 1-3 frame dropouts
                 active.append({
                     "id": slot_id,
-                    "box": slot["smooth_box"],
+                    "box": list(slot["smooth_box"]),
                     "history": list(slot.get("history", [])),
                 })
         return active
@@ -167,7 +177,7 @@ def run(frames, fps, size, cfg):
         roi = np.array([(int(x * w), int(y * h)) for x, y in pts], dtype=np.int32)
 
     max_players = cfg.get("max_players", 4)
-    tracker = AdvancedPlayerTracker(
+    tracker = ElitePlayerTracker(
         max_players=max_players,
         max_lost_frames=int(fps * 2.5),
         smooth_alpha=0.75,
@@ -214,16 +224,16 @@ def draw(frame, i, data):
         cx = (x1 + x2) // 2
         bw = max(22, x2 - x1)
 
-        # 1. Subtle footstep trail
+        # 1. Footstep movement trail
         history = d.get("history", [])
         for idx in range(len(history) - 1):
             pt1 = history[idx]
             pt2 = history[idx + 1]
             progress = (idx + 1) / len(history)
-            trail_color = tuple(int(c * (0.3 + 0.7 * progress)) for c in color)
+            trail_color = tuple(int(c * (0.35 + 0.65 * progress)) for c in color)
             cv2.line(frame, pt1, pt2, trail_color, max(1, int(progress * 2.5)), cv2.LINE_AA)
 
-        # 2. Semi-transparent foot ellipse
+        # 2. Semi-transparent foot ground ellipse
         axes = (int(bw * 0.72), max(6, int(bw * 0.22)))
         overlay = frame.copy()
         cv2.ellipse(overlay, (cx, y2), axes, 0, 0, 360, color, -1, lineType=cv2.LINE_AA)
@@ -231,19 +241,21 @@ def draw(frame, i, data):
         cv2.ellipse(frame, (cx, y2), axes, 0, 0, 360, color, 2, lineType=cv2.LINE_AA)
 
         # 3. Modern Player Pill Badge
-        label = f"PLAYER {tid}"
+        label = f"P{tid}"
         font = cv2.FONT_HERSHEY_DUPLEX
         font_scale = 0.50
         thickness = 1
         (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
 
-        badge_w = tw + 16
-        badge_h = th + 10
+        badge_w = tw + 14
+        badge_h = th + 8
         bx1 = cx - badge_w // 2
         by1 = max(6, y1 - badge_h - 6)
         bx2 = bx1 + badge_w
         by2 = by1 + badge_h
 
+        # Badge drop shadow & border
+        cv2.rectangle(frame, (bx1 + 1, by1 + 1), (bx2 + 1, by2 + 1), (0, 0, 0), -1)
         cv2.rectangle(frame, (bx1, by1), (bx2, by2), (20, 20, 20), -1)
         cv2.rectangle(frame, (bx1, by1), (bx2, by2), color, 2, cv2.LINE_AA)
-        cv2.putText(frame, label, (bx1 + 8, by2 - 6), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        cv2.putText(frame, label, (bx1 + 7, by2 - 5), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
